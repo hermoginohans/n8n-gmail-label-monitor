@@ -1,0 +1,659 @@
+{
+  "name": "Gmail Label Monitor to Sheets & Drive",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "6b55714e-4a18-4b0b-87fb-6f17f134b696",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Gmail categories to monitor. Valid values: primary, promotions, social, updates, forums.\nconst CATEGORIES = ['primary', 'promotions', 'social'];\nreturn [{ json: { categories: CATEGORIES } }];"
+      },
+      "id": "2e048eee-e7f3-4b7e-91c5-adff6938157b",
+      "name": "Config - Labels to Monitor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "label"
+      },
+      "id": "5a2cd549-c124-4571-ac0f-a65273eddbdd",
+      "name": "Get Gmail Labels",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        96
+      ],
+      "executeOnce": true,
+      "webhookId": "1aafff2c-5ed5-467b-98fe-b3bc5aa072c0"
+    },
+    {
+      "parameters": {
+        "jsCode": "const monitored = ($('Config - Labels to Monitor').first().json.categories || []).map(c => String(c).trim().toLowerCase()).filter(Boolean);\nconst q = monitored.map(c => 'category:' + c).join(' OR ');\nreturn [{ json: { q, monitoredMap: {}, categories: monitored } }];"
+      },
+      "id": "90544856-5e0e-4217-afd0-764748538e71",
+      "name": "Build Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "simple": false,
+        "filters": {
+          "q": "={{ $('Build Query').first().json.q }}",
+          "readStatus": "unread"
+        },
+        "options": {
+          "dataPropertyAttachmentsPrefixName": "attachment_",
+          "downloadAttachments": true
+        }
+      },
+      "id": "9e8407b5-d0fd-4d37-8e0c-e6dc1d6de92d",
+      "name": "Get Unread Emails",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        896,
+        96
+      ],
+      "webhookId": "4b286574-bea3-48fe-bb54-c3b013435ee8"
+    },
+    {
+      "parameters": {
+        "jsCode": "const monitoredMap = $('Build Query').first().json.monitoredMap || {};\nconst out = [];\n\nfunction parseFrom(j) {\n  // Non-simple Gmail output: from.value[0].{name,address}\n  if (j.from && Array.isArray(j.from.value) && j.from.value[0]) {\n    return { name: j.from.value[0].name || '', address: j.from.value[0].address || '' };\n  }\n  // Fallbacks: \"From\" string or headers.from -> \"Name <email>\"\n  const raw = j.From || (j.headers && j.headers.from) || (j.from && j.from.text) || '';\n  const m = String(raw).match(/^\\s*\"?([^\"<]*?)\"?\\s*<([^>]+)>/);\n  if (m) return { name: (m[1] || '').trim(), address: (m[2] || '').trim() };\n  return { name: '', address: String(raw).trim() };\n}\n\nfunction sanitize(s) {\n  return String(s || '').replace(/[\\\\/:*?\"<>|]/g, '_').replace(/\\s+/g, ' ').trim().slice(0, 100);\n}\n\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const f = parseFrom(j);\n  const senderName = sanitize(f.name || f.address || 'Unknown Sender');\n  const senderEmail = f.address || '';\n\n  const ids = Array.isArray(j.labelIds) ? j.labelIds\n    : (Array.isArray(j.labels) ? j.labels.map(l => l.id) : []);\n  let matchedLabel = '';\n  for (const id of ids) { if (monitoredMap[id]) { matchedLabel = monitoredMap[id]; break; } }\n  if (!matchedLabel) matchedLabel = 'Unlabeled';\n\n  let categoryName = 'Primary';\n  if (ids.includes('CATEGORY_PROMOTIONS')) categoryName = 'Promotions';\n  else if (ids.includes('CATEGORY_SOCIAL')) categoryName = 'Social';\n  else categoryName = 'Primary';\n\n  const ms = Number(j.internalDate || j.date || Date.now());\n  const dt = new Date(isNaN(ms) ? Date.now() : ms);\n  const dateReceived = dt.toISOString().slice(0, 10);\n\n  const bin = item.binary || {};\n  const hasAttachments = Object.keys(bin).length > 0;\n\n  out.push({\n    json: {\n      messageId: j.id || j.messageId || '',\n      senderName,\n      senderEmail,\n      subject: j.subject || j.Subject || '',\n      matchedLabel: sanitize(matchedLabel),\n      categoryName,\n      dateReceived,\n      hasAttachments,\n    },\n    binary: item.binary,\n  });\n}\nreturn out;"
+      },
+      "id": "ab369a34-69cd-47c0-a077-5ae42848f240",
+      "name": "Extract Sender Info",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Sheet1"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "messageId": "={{ $json.messageId }}",
+            "senderName": "={{ $json.senderName }}",
+            "senderEmail": "={{ $json.senderEmail }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "messageId",
+              "displayName": "messageId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "senderName",
+              "displayName": "senderName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "senderEmail",
+              "displayName": "senderEmail",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "matchedLabel",
+              "displayName": "matchedLabel",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "categoryName",
+              "displayName": "categoryName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "dateReceived",
+              "displayName": "dateReceived",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "hasAttachments",
+              "displayName": "hasAttachments",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "4cdd6798-ea54-4dba-b63c-9b764998a479",
+      "name": "Log to Google Sheet",
+      "credentials": {"googleSheetsOAuth2Api": {"id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID", "name": "SELECT: Google account with edit access to the destination spreadsheet"}},
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1344,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Extract Sender Info').item.json.messageId }}"
+      },
+      "id": "45ee0d88-6046-4be7-8c8c-ca1bac2eb906",
+      "name": "Mark as Read",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1568,
+        0
+      ],
+      "webhookId": "05ba7aed-3c17-4c0f-87fa-a120290c5b16"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has",
+              "leftValue": "={{ $json.hasAttachments }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "88d7033b-b6d3-4b34-93f2-104648479d44",
+      "name": "Has Attachments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1344,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "root",
+              "name": "rootFolderId",
+              "value": "<__PLACEHOLDER_VALUE__Google Drive root folder ID for attachment storage__>",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "1b4a8134-0e9a-40f2-a450-5e659747456f",
+      "name": "Add Root Folder",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1568,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_PROCESS_ATTACHMENTS_WORKFLOW_ID"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "840051a8-134c-4226-b321-b9a1506d81ae",
+      "name": "Process Attachments",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1792,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "label",
+        "operation": "create",
+        "name": "Primary",
+        "options": {}
+      },
+      "id": "5cf6eb4f-1431-43f1-93ad-f1d3849022a2",
+      "name": "Create Primary Label",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -112,
+        736
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "webhookId": "8b451b10-e4b7-4681-9cd1-65dafc4787ca",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "label",
+        "operation": "create",
+        "name": "Promotions",
+        "options": {}
+      },
+      "id": "e74c8519-c05c-4fdb-a008-903f63906ae5",
+      "name": "Create Promotions Label",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        736
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "webhookId": "7bf903a4-48de-4a98-9d0c-42aeae7ad4fe",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "label",
+        "operation": "create",
+        "name": "Social",
+        "options": {}
+      },
+      "id": "b7bdbccd-4b1f-4ca3-af68-21cf1a8d03d6",
+      "name": "Create Social Label",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        336,
+        736
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "webhookId": "5a5958f0-3ccf-4aee-805d-e60efbc8a57b",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "label"
+      },
+      "id": "b2155b8e-4a94-478a-b50c-6fb3cc8998ba",
+      "name": "Get Category Label IDs",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        640
+      ],
+      "executeOnce": true,
+      "webhookId": "0fab01ba-a4c9-43ab-a47c-47ebc57ea43e"
+    },
+    {
+      "parameters": {
+        "jsCode": "const emails = $('Extract Sender Info').all().map(i => i.json || {});\nconst labels = $input.all().map(i => i.json || {});\nconst targets = ['Primary', 'Promotions', 'Social'];\nconst map = {};\nfor (const l of labels) { if (l && l.name && targets.includes(l.name)) map[l.name] = l.id; }\nconst out = [];\nfor (const e of emails) {\n  const labelId = map[e.categoryName];\n  if (labelId && e.messageId) {\n    out.push({ json: { messageId: e.messageId, labelId, categoryName: e.categoryName } });\n  }\n}\nreturn out;"
+      },
+      "id": "627320b5-dc0d-4046-a74a-1e463fea3b4e",
+      "name": "Build Apply List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "={{ $json.labelId }}"
+        ]
+      },
+      "id": "a37fdcf9-3560-4ba0-bb03-cc4156b153e6",
+      "name": "Apply Category Label",
+      "credentials": {"gmailOAuth2": {"id": "YOUR_GMAIL_CREDENTIAL_ID", "name": "SELECT: Gmail account whose inbox you want to monitor"}},
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1008,
+        640
+      ],
+      "webhookId": "b91a1152-5874-4b75-8626-5844bb141300"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Config - Labels to Monitor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config - Labels to Monitor": {
+      "main": [
+        [
+          {
+            "node": "Get Gmail Labels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Gmail Labels": {
+      "main": [
+        [
+          {
+            "node": "Build Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Query": {
+      "main": [
+        [
+          {
+            "node": "Get Unread Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unread Emails": {
+      "main": [
+        [
+          {
+            "node": "Extract Sender Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Sender Info": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Has Attachments?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Primary Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Mark as Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Attachments?": {
+      "main": [
+        [
+          {
+            "node": "Add Root Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add Root Folder": {
+      "main": [
+        [
+          {
+            "node": "Process Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Primary Label": {
+      "main": [
+        [
+          {
+            "node": "Create Promotions Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Promotions Label": {
+      "main": [
+        [
+          {
+            "node": "Create Social Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Social Label": {
+      "main": [
+        [
+          {
+            "node": "Get Category Label IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Category Label IDs": {
+      "main": [
+        [
+          {
+            "node": "Build Apply List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Apply List": {
+      "main": [
+        [
+          {
+            "node": "Apply Category Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "cdd289ce-e475-4473-8423-4966c8f6972e",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "08119c5d08e00a2796a32feeb5c496fe2b672642d95262a55c305bc36fa9a717"
+  },
+  "nodeGroups": [
+    {
+      "id": "61df51b9-c5a3-445d-a2d9-8855f8f62636",
+      "name": "Discover",
+      "nodeIds": [
+        "2e048eee-e7f3-4b7e-91c5-adff6938157b",
+        "5a2cd549-c124-4571-ac0f-a65273eddbdd",
+        "90544856-5e0e-4217-afd0-764748538e71"
+      ],
+      "description": "Load monitored label names, fetch label IDs, and build the Gmail search query."
+    },
+    {
+      "id": "db8d5c84-deb8-44f8-806b-6afb167c0aca",
+      "name": "Ingest & Extract",
+      "nodeIds": [
+        "9e8407b5-d0fd-4d37-8e0c-e6dc1d6de92d",
+        "ab369a34-69cd-47c0-a077-5ae42848f240"
+      ],
+      "description": "Fetch unread emails across monitored labels and extract sender details plus attachments."
+    },
+    {
+      "id": "1b659bda-f989-4f0c-acb5-6db1a9d42d17",
+      "name": "Log & Mark",
+      "nodeIds": [
+        "4cdd6798-ea54-4dba-b63c-9b764998a479",
+        "45ee0d88-6046-4be7-8c8c-ca1bac2eb906"
+      ],
+      "description": "Append each email to the Google Sheet and mark it as read."
+    },
+    {
+      "id": "f76aaba5-8ef2-489c-8b92-b17931d5bfea",
+      "name": "Store Attachments",
+      "nodeIds": [
+        "88d7033b-b6d3-4b34-93f2-104648479d44",
+        "1b4a8134-0e9a-40f2-a450-5e659747456f",
+        "840051a8-134c-4226-b321-b9a1506d81ae"
+      ],
+      "description": "If attachments exist, store them in Google Drive under Label / Date / Sender folders."
+    },
+    {
+      "id": "36d5c536-0713-497e-8d85-f781e06fc6c3",
+      "name": "Categorize & Label",
+      "nodeIds": [
+        "5cf6eb4f-1431-43f1-93ad-f1d3849022a2",
+        "e74c8519-c05c-4fdb-a008-903f63906ae5",
+        "b7bdbccd-4b1f-4ca3-af68-21cf1a8d03d6",
+        "b2155b8e-4a94-478a-b50c-6fb3cc8998ba",
+        "627320b5-dc0d-4046-a74a-1e463fea3b4e",
+        "a37fdcf9-3560-4ba0-bb03-cc4156b153e6"
+      ],
+      "description": "Ensure Primary/Promotions/Social labels exist, resolve their IDs, and apply the matching label to each email based on its Gmail category."
+    }
+  ],
+  "id": "52HN0Bdyom9PDUIA",
+  "tags": []
+}

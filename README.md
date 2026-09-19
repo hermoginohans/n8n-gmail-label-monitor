@@ -10,18 +10,23 @@ The template checks every **15 minutes** and monitors **Primary, Promotions, and
 
 ## Workflow
 
-```
+
+```mermaid
 flowchart TD
-    A[Every 15 minutes] --> B[Build Gmail category query]
-    B --> C[Fetch unread messages and attachments]
-    C --> D[Extract sender and message details]
-    D --> E[Append to Google Sheets]
-    E --> F[Mark message as read]
-    D --> G{Has attachments?}
-    G -->|Yes| H[Add Drive root folder ID]
-    H --> I[Call attachment subworkflow]
-    D --> J[Create or resolve category labels]
-    J --> K[Apply matching Gmail label]
+    A["Every 15 Minutes"] --> B["Build Gmail Category Query"]
+    B --> C["Fetch Unread Messages and Attachments"]
+    C --> D["Extract Sender and Message Details"]
+
+    D --> E["Append Data to Google Sheets"]
+    E --> F["Mark Message as Read"]
+
+    D --> G{"Has Attachments?"}
+    G -->|Yes| H["Add Google Drive Root Folder ID"]
+    H --> I["Call Attachment Subworkflow"]
+    G -->|No| J["Create or Resolve Category Labels"]
+
+    I --> J
+    J --> K["Apply Matching Gmail Label"]
 ```
 
 The attachment subworkflow is **not included in this JSON**. Google Drive uploads require that separate workflow and its own configured credentials.
